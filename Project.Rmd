@@ -1,0 +1,228 @@
+---
+title: "Project"
+author: "Dung Pham"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#libaries
+library(tidyverse)
+library(car)
+library(lmtest)
+library(MASS)
+library(ggplot2)
+```
+
+```{r}
+nba_data <- read_csv("Data/nba_team_stats_00_to_23.csv")
+
+#Create ranking by wins (descending)
+
+nba_data <- nba_data %>%
+group_by(season) %>%
+mutate(ranking = rank(-wins, ties.method = "first")) %>%
+arrange(season, ranking)
+
+write_csv(nba_data, "Data/nba_team_stats_ranked.csv")
+
+nba_model <- read_csv("Data/nba_team_stats_ranked.csv")
+
+```
+
+```{r}
+# for reproducibility
+set.seed(325)
+n <- nrow(nba_model)
+train_idx <- sample(seq_len(n), size = floor(0.7 * n))
+
+nba_train <- nba_model[train_idx, ]
+nba_test  <- nba_model[-train_idx, ]
+
+```
+
+```{r}
+vars_use <- c(
+  "wins",
+  "field_goal_percentage",
+  "three_point_percentage",
+  "free_throw_percentage",
+  "assists",
+  "turnovers",
+  "offensive_rebounds",
+  "defensive_rebounds",
+  "steals",
+  "blocks",
+  "personal_fouls",
+  "personal_fouls_drawn"
+)
+
+# Compute mean and SD for each variable
+summary_stats <- nba_model %>%
+  dplyr::select(all_of(vars_use)) %>%
+  dplyr::summarise(across(everything(),
+                   list(mean = mean, sd = sd),
+                   na.rm = TRUE))
+
+summary_stats
+
+```
+
+
+
+```{r}
+#full model
+full_mod <- lm(wins ~ field_goal_percentage +
+                 three_point_percentage +
+                 free_throw_percentage +
+                 assists + turnovers +
+                 offensive_rebounds + 
+                 defensive_rebounds +
+                 steals + blocks +
+                 personal_fouls + 
+                 personal_fouls_drawn,
+               data = nba_train)
+
+summary(full_mod)
+vif(full_mod)
+
+```
+
+```{r}
+step_mod <- stepAIC(full_mod, direction = "both", trace = FALSE)
+summary(step_mod)
+vif(step_mod)
+
+```
+
+```{r}
+#offensive model
+off_mod <- lm( wins ~ field_goal_percentage + three_point_percentage +
+                 free_throw_percentage + assists + offensive_rebounds + turnovers,
+               data = nba_train
+               )
+
+summary(off_mod)
+
+```
+
+```{r}
+#defensive model
+def_mod <- lm( wins ~ steals + blocks + defensive_rebounds + personal_fouls,
+               data = nba_train
+               )
+
+summary(def_mod)
+
+```
+
+```{r}
+# Offensive Interaction FG% × Assists
+
+off_int <- lm( wins ~ field_goal_percentage * assists +
+                 three_point_percentage + free_throw_percentage +
+                 offensive_rebounds + turnovers,
+               data = nba_train
+               )
+anova(off_mod, off_int)
+
+#Defensive interaction block x de_rebounds
+
+def_int <- lm( wins ~ blocks * defensive_rebounds + steals + personal_fouls,
+               data = nba_train
+               )
+
+anova(def_mod, def_int)
+
+```
+```{r}
+#final models
+
+final_offensive_model <- lm(wins ~ field_goal_percentage +
+                              three_point_percentage +
+                              offensive_rebounds + turnovers,
+                            data = nba_train
+                            )
+
+summary(final_offensive_model)
+
+final_defensive_model <- lm(wins ~ steals + personal_fouls + blocks + defensive_rebounds,
+                            data = nba_train
+                            )
+
+summary(final_defensive_model)
+
+```
+```{r}
+#residual analysis
+
+par(mfrow = c(2, 2))
+
+plot(fitted(final_offensive_model),
+     resid(final_offensive_model),
+     xlab = "Fitted Values",
+     ylab = "Residuals",
+     main = "Residuals vs Fitted (Offensive)")
+abline(h = 0, col = "red")
+
+qqnorm(resid(final_offensive_model), main = "Q-Q Plot (Offensive)")
+qqline(resid(final_offensive_model), col = "red")
+
+plot(fitted(final_defensive_model),
+     resid(final_defensive_model),
+     xlab = "Fitted Values",
+     ylab = "Residuals",
+     main = "Residuals vs Fitted (Defensive)")
+abline(h = 0, col = "red")
+
+qqnorm(resid(final_defensive_model), main = "Q-Q Plot (Defensive)")
+qqline(resid(final_defensive_model), col = "red")
+
+par(mfrow = c(1, 1))
+
+```
+
+```{r}
+nba_train <- as_tibble(nba_train)
+
+# Add predictions to training data
+nba_train <- nba_train %>%
+  mutate(
+    pred_off = predict(final_offensive_model),
+    pred_def = predict(final_defensive_model)
+  )
+
+# Combine into long format for faceting
+plot_data <- nba_train %>%
+  dplyr::select(wins, pred_off, pred_def) %>%
+  pivot_longer(
+    cols = c(pred_off, pred_def),
+    names_to = "model",
+    values_to = "pred_wins"
+  ) %>%
+  mutate(
+    model = ifelse(model == "pred_off", "Offensive Model", "Defensive Model")
+  )
+
+# Plot
+ggplot(plot_data, aes(x = pred_wins, y = wins)) +
+  geom_point(alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, color = "red", size = 1) +
+  facet_wrap(~ model) +
+  labs(
+    title = "Figure 1: Predicted vs Actual Wins",
+    x = "Predicted Wins",
+    y = "Actual Wins"
+  ) +
+  theme_minimal()
+
+ggsave("figure1_exploratory.png", width = 6, height = 4, dpi = 300)
+
+
+```
+
+
